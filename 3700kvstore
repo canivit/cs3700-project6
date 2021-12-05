@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+
+import sys
+import socket
+import select
+import time
+import json
+import random
+
+# Your ID number
+my_id = sys.argv[1]
+# The ID numbers of all the other replicas
+replica_ids = sys.argv[2:]
+# The ID of the leader
+leader_id = ''
+majority = ((len(replica_ids) + 1) // 2) + 1
+database = {}
+log = []
+term = 0
+votes = []
+SELECT_WAIT_TIME = random.randrange(150, 300, 10) / 1000
+HEARTBEAT_TIME = 100
+last = 0
+
+TERMINATOR = b'}\n'
+buffer = b''
+
+
+def recv_msgs():
+    global buffer
+
+    fresh_buf = sock.recv(16384)
+
+    # is this sock shutting down?
+    if len(fresh_buf) == 0:
+        return None
+
+    buffer += fresh_buf
+
+    msgs = []
+    while TERMINATOR in buffer:
+        position = buffer.find(TERMINATOR) + len(TERMINATOR)
+        # -1 to remove the \n, which json.loads won't want
+        msgs.append(json.loads(buffer[:position - 1].decode()))
+        buffer = buffer[position:]
+
+    return msgs
+
+
+def send_msg(msg):
+    sock.send(json.dumps(msg).encode() + b'\n')
+    print('Replica %s sent:\n%s\n' % (my_id, json.dumps(msg, indent=2)))
+
+
+def create_msg(src, dst, leader, type, mid):
+    msg = {
+        'src': src,
+        'dst': dst,
+        'leader': leader,
+        'type': type,
+        'MID': mid
+    }
+    return msg
+
+
+def handle_get_msg(msg):
+    response = None
+    if leader_id == my_id:
+        key = msg['key']
+        response = create_msg(my_id, msg['src'], leader_id, 'ok', msg['MID'])
+        if key in database:
+            response['value'] = database[key]
+        else:
+            response['value'] = ''
+    else:
+        response = create_msg(
+            my_id, msg['src'], leader_id, 'redirect', msg['MID'])
+    send_msg(response)
+
+
+def handle_put_msg(msg):
+    response = None
+    if leader_id == my_id:
+        database[msg['key']] = msg['value']
+        response = create_msg(my_id, msg['src'], leader_id, 'ok', msg['MID'])
+    else:
+        response = create_msg(
+            my_id, msg['src'], leader_id, 'redirect', msg['MID'])
+    send_msg(response)
+
+
+def handle_request_vote_msg(msg):
+    response = create_msg(my_id, msg['src'], msg['leader'], 'vote', msg['MID'])
+    send_msg(response)
+
+
+def handle_vote_msg(msg):
+    global leader_id
+    global votes
+    if msg['src'] not in votes:
+        votes.append(votes)
+    if len(votes) >= majority:
+        leader_id = my_id
+        votes = []
+        print('Replica %s: I am the new leader\n' % my_id)
+        for id in replica_ids:
+            msg = create_msg(my_id, id, leader_id, 'leader', term)
+            send_msg(msg)
+
+
+def handle_leader_msg(msg):
+    global leader_id
+    leader_id = msg['src']
+    print('Replica %s: %s is now the new leader.\n' % (my_id, leader_id))
+
+
+def begin_leader_election():
+    global term
+    term += 1
+    votes.append(my_id)
+    print('Replica %s has started a new election\n' % my_id)
+    for id in replica_ids:
+        msg = create_msg(my_id, id, my_id, 'request_vote', term)
+        send_msg(msg)
+
+
+def send_heartbeat():
+    for id in replica_ids:
+        msg = create_msg(my_id, id, my_id, 'heartbeat', term)
+        send_msg(msg)
+
+
+def handle_msg(msg):
+    log.append(msg)
+    print('Replica %s received:\n%s\n' % (my_id, json.dumps(msg, indent=2)))
+    if msg['type'] == 'get':
+        handle_get_msg(msg)
+    elif msg['type'] == 'put':
+        handle_put_msg(msg)
+    elif msg['type'] == 'request_vote':
+        handle_request_vote_msg(msg)
+    elif msg['type'] == 'vote':
+        handle_vote_msg(msg)
+    elif msg['type'] == 'leader':
+        handle_leader_msg(msg)
+
+
+# Connect to the network. All messages to/from other replicas and clients will
+# occur over this socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(my_id)
+print('Replica %s is up. Majority: %d. Election timeout: %dms.\n' %
+      (my_id, majority, SELECT_WAIT_TIME * 1000))
+while True:
+    ready = None
+    if my_id == leader_id:
+        ready = select.select([sock], [], [], HEARTBEAT_TIME)[0]
+        send_heartbeat()
+    else:
+        ready = select.select([sock], [], [], SELECT_WAIT_TIME)[0]
+    if sock in ready:
+        msgs = recv_msgs()
+        for msg in msgs:
+            handle_msg(msg)
+    elif my_id != leader_id:
+        begin_leader_election()
