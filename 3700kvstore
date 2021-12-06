@@ -18,8 +18,8 @@ database = {}
 log = []
 term = 0
 votes = []
-SELECT_WAIT_TIME = random.randrange(150, 300, 10) / 1000
-HEARTBEAT_TIME = 100
+SELECT_WAIT_TIME = random.randrange(150, 300, 5) / 1000
+HEARTBEAT_TIME = 145 / 1000
 last = 0
 
 TERMINATOR = b'}\n'
@@ -111,7 +111,7 @@ def handle_vote_msg(msg):
 def handle_leader_msg(msg):
     global leader_id
     leader_id = msg['src']
-    print('Replica %s: %s is now the new leader.\n' % (my_id, leader_id))
+    print('Replica %s: %s is now the leader.\n' % (my_id, leader_id))
 
 
 def begin_leader_election():
@@ -157,6 +157,7 @@ while True:
         ready = select.select([sock], [], [], HEARTBEAT_TIME)[0]
         send_heartbeat()
     else:
+        last = time.time_ns()
         ready = select.select([sock], [], [], SELECT_WAIT_TIME)[0]
     if sock in ready:
         msgs = recv_msgs()
