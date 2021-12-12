@@ -18,8 +18,8 @@ database = {}
 log = []
 term = 0
 votes = []
-SELECT_WAIT_TIME = random.randrange(150, 300, 5) / 1000
-HEARTBEAT_TIME = 145 / 1000
+SELECT_WAIT_TIME = random.randrange(100, 250, 5) / 1000
+HEARTBEAT_TIME = 100 / 1000
 
 TERMINATOR = b'}\n'
 buffer = b''
