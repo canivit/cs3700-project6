@@ -20,7 +20,6 @@ term = 0
 votes = []
 SELECT_WAIT_TIME = random.randrange(150, 300, 5) / 1000
 HEARTBEAT_TIME = 145 / 1000
-last = 0
 
 TERMINATOR = b'}\n'
 buffer = b''
@@ -157,7 +156,6 @@ while True:
         ready = select.select([sock], [], [], HEARTBEAT_TIME)[0]
         send_heartbeat()
     else:
-        last = time.time_ns()
         ready = select.select([sock], [], [], SELECT_WAIT_TIME)[0]
     if sock in ready:
         msgs = recv_msgs()
