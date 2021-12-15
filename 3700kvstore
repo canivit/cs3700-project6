@@ -75,7 +75,8 @@ def recv_msgs():
 def send_msg(msg):
     sock.send(json.dumps(msg).encode() + b'\n')
     passed = time.time() - start_time
-    print('Replica %s sent at %f:\n%s\n' % (my_id, passed, json.dumps(msg, indent=2)))
+    print('Replica %s sent at %f:\n%s\n' %
+          (my_id, passed, json.dumps(msg, indent=2)))
 
 
 def create_msg(dst, type, mid):
@@ -109,16 +110,18 @@ def handle_put_msg(msg):
     response = None
     if server_state == LEADER:
         log.append(
-            {'term': current_term, 'key': msg['key'], 'value': msg['value']})
+            {'term': current_term,
+             'key': msg['key'],
+             'value': msg['value'],
+             'client': msg['src'],
+             'MID': msg['MID']})
         send_append_entries()
         # database[msg['key']] = msg['value']
-        response = create_msg(msg['src'], 'ok', msg['MID'])
+        # response = create_msg(msg['src'], 'ok', msg['MID'])
     elif server_state == FOLLOWER:
         response = create_msg(msg['src'], 'redirect', msg['MID'])
-    else:
-        return
-    send_msg(response)
-
+        send_msg(response)
+    
 
 def send_append_entries():
     for id in replica_ids:
@@ -147,8 +150,13 @@ def apply_commits():
     while last_applied < commit_index:
         last_applied += 1
         key = log[last_applied]['key']
-        value = log[last_applied]['value']
+        value = log[last_applied]['value']     
         database[key] = value
+        if server_state == LEADER:
+            client = log[last_applied]['client']
+            mid = log[last_applied]['MID']
+            response = create_msg(client, 'ok', mid)
+            send_msg(response)
 
 
 def handle_grant_append_msg(msg):
@@ -178,7 +186,6 @@ def handle_grant_append_msg(msg):
 def handle_reject_append_msg(msg):
     if server_state != LEADER:
         return
-
     id = msg['src']
     next_indexes[id] = next_indexes[id] - 1
 
@@ -190,10 +197,10 @@ def handle_request_vote_msg(msg):
     global current_term
 
     if msg['term'] >= current_term:
-         current_term = msg['term']
-         server_state = FOLLOWER
-         votes = []
-         voted_for = None
+        current_term = msg['term']
+        server_state = FOLLOWER
+        votes = []
+        voted_for = None
 
     if server_state == FOLLOWER:
 
@@ -262,7 +269,7 @@ def handle_append_entries_msg(msg):
     global leader_id
     global votes
     global voted_for
-    global last_append    
+    global last_append
 
     if msg['term'] >= current_term:
         current_term = msg['term']
@@ -272,7 +279,7 @@ def handle_append_entries_msg(msg):
         voted_for = None
 
     if server_state == FOLLOWER:
-        
+
         reject = {
             'src': my_id,
             'dst': msg['src'],
@@ -283,7 +290,7 @@ def handle_append_entries_msg(msg):
 
         if msg['term'] < current_term:
             return
-        
+
         last_append = time.time()
 
         if len(msg['entries']) == 0:
@@ -367,7 +374,8 @@ def send_heartbeat():
 
 def handle_msg(msg):
     passed = time.time() - start_time
-    print('Replica %s received at %f:\n%s\n' % (my_id, passed, json.dumps(msg, indent=2)))    
+    print('Replica %s received at %f:\n%s\n' %
+          (my_id, passed, json.dumps(msg, indent=2)))
     if msg['type'] == 'get':
         handle_get_msg(msg)
     elif msg['type'] == 'put':
