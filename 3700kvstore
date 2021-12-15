@@ -9,7 +9,7 @@ import random
 # Your ID number
 my_id = sys.argv[1]
 # The ID of the leader
-leader_id = '0000'
+leader_id = 'FFFF'
 # The ID numbers of all the other replicas
 replica_ids = sys.argv[2:]
 
@@ -42,8 +42,8 @@ last_applied = 0
 votes = []
 
 # volatile state on all leaders
-next_index = {}
-match_index = {}
+next_indexes = {}
+match_indexes = {}
 
 
 def recv_msgs():
@@ -94,68 +94,218 @@ def handle_get_msg(msg):
             response['value'] = ''
     elif server_state == FOLLOWER:
         response = create_msg(msg['src'], 'redirect', msg['MID'])
+    else:
+        return
     send_msg(response)
 
 
 def handle_put_msg(msg):
     response = None
     if server_state == LEADER:
-        log.append({'term': current_term, 'key': msg['key'], 'value': msg['value']})
-        database[msg['key']] = msg['value']
+        log.append(
+            {'term': current_term, 'key': msg['key'], 'value': msg['value']})
+        send_append_entries()
+        # database[msg['key']] = msg['value']
         response = create_msg(msg['src'], 'ok', msg['MID'])
     elif server_state == FOLLOWER:
         response = create_msg(msg['src'], 'redirect', msg['MID'])
+    else:
+        return
     send_msg(response)
 
 
+def send_append_entries():
+    for id in replica_ids:
+        next_index = next_indexes[id]
+        prev_log_index = next_index - 1
+        prev_log_term = log[prev_log_index]['term']
+        entries = log[next_index:]
+        msg = {
+            'src': my_id,
+            'dst': id,
+            'type': 'append_entries',
+            'term': current_term,
+            'leader': leader_id,
+            'prev_log_index': prev_log_index,
+            'prev_log_term': prev_log_term,
+            'entries': entries,
+            'leader_commit': commit_index
+        }
+        send_msg(msg)
+
+
+def apply_commits():
+    global last_applied
+    global commit_index
+    while last_applied < commit_index:
+        last_applied += 1
+        key = log[last_applied]['key']
+        value = log[last_applied]['value']
+        database[key] = value
+
+
+def handle_grant_append_msg(msg):
+    global commit_index
+
+    if server_state != LEADER:
+        return
+
+    id = msg['src']
+    next_indexes[id] = msg['next_index']
+    match_indexes[id] = msg['next_index'] - 1
+
+    i = len(log) - 1
+    while i >= 0:
+        if log[i]['term'] == current_term:
+            count = 0
+            for id in match_indexes:
+                if match_indexes[id] >= i:
+                    count += 1
+            if count >= majority - 1:
+                break
+        i -= 1
+    commit_index = i
+    apply_commits()
+
+
+def handle_reject_append_msg(msg):
+    if server_state != LEADER:
+        return
+
+    id = msg['src']
+    next_indexes[id] -= 1
+
+
 def handle_request_vote_msg(msg):
+    global server_state
+    global voted_for
+    global votes
+
     if server_state != FOLLOWER:
         return
+
+    reject = {
+        'src': my_id,
+        'dst': msg['src'],
+        'leader': leader_id,
+        'type': 'reject_vote',
+        'term': current_term
+    }
+
+    grant = {
+        'src': my_id,
+        'dst': msg['src'],
+        'leader': leader_id,
+        'type': 'grant_vote',
+        'term': current_term
+    }
+
     if msg['term'] < current_term:
+        #send_msg(reject)
         return
     if not (voted_for == None or msg['candidate_id']):
+        #send_msg(reject)
         return
     # compare last terms, then compare log length
     my_last_log_term = log[len(log) - 1]['term']
     candidate_last_log_term = msg['last_log_term']
     if my_last_log_term > candidate_last_log_term:
+        #send_msg(reject)
         return
     if my_last_log_term == candidate_last_log_term and len(log) - 1 > msg['last_log_index']:
+        #send_msg(reject)
         return
-    vote = {
-        'src': my_id,
-        'dst': msg['src'],
-        'type': 'grant_vote',
-        'leader': leader_id
-    }
-    send_msg(vote)
+    send_msg(grant)
 
 
 def handle_grant_vote_msg(msg):
     global leader_id
     global votes
     global server_state
+    global next_indexes
+    global match_indexes
     if server_state != CANDIDATE:
         return
     if msg['src'] not in votes:
         votes.append(votes)
         if len(votes) >= majority:
+            print('Replica %s is the new leader' % my_id)
             server_state = LEADER
             leader_id = my_id
             votes = []
+            next_indexes = {}
+            match_indexes = {}
             for id in replica_ids:
-                next_index[id] = len(log)
-                match_index[id] = 0
+                next_indexes[id] = len(log)
+                match_indexes[id] = 0
 
 
 def handle_append_entries_msg(msg):
     global current_term
+    global commit_index
+    global log
+    global server_state
     global leader_id
-    if (server_state == CANDIDATE or server_state == LEADER) and msg['term'] >= current_term:
-        server_state == FOLLOWER
-    if server_state == FOLLOWER:
-        current_term = max(msg['term'], current_term)
+    global votes
+    global voted_for
+
+    if msg['term'] > current_term:
+        current_term = msg['term']
+        server_state = FOLLOWER
         leader_id = msg['leader']
+        votes = []
+        voted_for = None
+
+    if server_state == FOLLOWER:
+        reject = {
+            'src': my_id,
+            'dst': msg['src'],
+            'leader': leader_id,
+            'type': 'reject_append',
+            'term': current_term
+        }
+
+        if msg['term'] < current_term:
+            return
+
+        if len(msg['entries']) == 0:
+            return
+
+        prev_log_index = msg['prev_log_index']
+        prev_log_term = msg['prev_log_term']
+        if len(log) < prev_log_index or log[prev_log_index]['term'] != prev_log_term:
+            send_msg(reject)
+            return
+
+        log_insert_index = prev_log_index + 1
+        new_entry_index = 0
+        new_entries = msg['entries']
+        while True:
+            if log_insert_index >= len(log) or new_entry_index >= len(new_entries):
+                break
+            if log[log_insert_index]['term'] != new_entries[new_entry_index]['term']:
+                break
+            log_insert_index += 1
+            new_entry_index += 1
+        if new_entry_index < len(new_entries):
+            log = log[:log_insert_index]
+            log.extend(new_entries[new_entry_index:])
+
+        leader_commit = msg['leader_commit']
+        if leader_commit > commit_index:
+            commit_index = min(leader_commit, len(log) - 1)
+
+        grant = {
+            'src': my_id,
+            'dst': msg['src'],
+            'leader': leader_id,
+            'type': 'grant_append',
+            'term': current_term,
+            'next_index': len(log)
+        }
+        send_msg(grant)
+
+        apply_commits()
 
 
 def begin_leader_election():
@@ -183,24 +333,21 @@ def begin_leader_election():
 
 def send_heartbeat():
     for id in replica_ids:
-        prev_log_index = next_index[id] - 1
-        prev_log_term = log[prev_log_index]['term']
+        entries = []
         msg = {
             'src': my_id,
             'dst': id,
             'type': 'append_entries',
             'term': current_term,
             'leader': leader_id,
-            'prev_log_index': prev_log_index,
-            'prev_log_term': prev_log_term,
-            'entries': [],
-            'leader_commit': commit_index
+            'entries': entries
         }
         send_msg(msg)
 
 
 def handle_msg(msg):
     print('Replica %s received:\n%s\n' % (my_id, json.dumps(msg, indent=2)))
+
     if msg['type'] == 'get':
         handle_get_msg(msg)
     elif msg['type'] == 'put':
@@ -211,6 +358,10 @@ def handle_msg(msg):
         handle_grant_vote_msg(msg)
     elif msg['type'] == 'append_entries':
         handle_append_entries_msg(msg)
+    elif msg['type'] == 'grant_append':
+        handle_grant_append_msg(msg)
+    elif msg['type'] == 'reject_append':
+        handle_reject_append_msg(msg)
 
 
 # Connect to the network. All messages to/from other replicas and clients will
