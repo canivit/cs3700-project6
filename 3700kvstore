@@ -5,6 +5,7 @@ import socket
 import select
 import json
 import random
+import time
 
 # Your ID number
 my_id = sys.argv[1]
@@ -13,10 +14,14 @@ leader_id = 'FFFF'
 # The ID numbers of all the other replicas
 replica_ids = sys.argv[2:]
 
-majority = ((len(replica_ids) + 1) // 2) + 1
+MAJORITY = ((len(replica_ids) + 1) // 2) + 1
 
-SELECT_WAIT_TIME = random.randrange(100, 250, 5) / 1000
-HEARTBEAT_TIME = 100 / 1000
+ELECTION_TIMEOUT = random.randrange(100, 200, 5)
+HEARTBEAT_TIME = 80
+SELECT_WAIT = 0.01
+last_heartbeat = time.time()
+last_append = time.time()
+start_time = time.time()
 
 TERMINATOR = b'}\n'
 buffer = b''
@@ -69,7 +74,8 @@ def recv_msgs():
 
 def send_msg(msg):
     sock.send(json.dumps(msg).encode() + b'\n')
-    print('Replica %s sent:\n%s\n' % (my_id, json.dumps(msg, indent=2)))
+    passed = time.time() - start_time
+    print('Replica %s sent at %f:\n%s\n' % (my_id, passed, json.dumps(msg, indent=2)))
 
 
 def create_msg(dst, type, mid):
@@ -118,6 +124,7 @@ def send_append_entries():
     for id in replica_ids:
         next_index = next_indexes[id]
         prev_log_index = next_index - 1
+        print('Replica %s: %d %d' % (my_id, prev_log_index, len(log)))
         prev_log_term = log[prev_log_index]['term']
         entries = log[next_index:]
         msg = {
@@ -161,7 +168,7 @@ def handle_grant_append_msg(msg):
             for id in match_indexes:
                 if match_indexes[id] >= i:
                     count += 1
-            if count >= majority - 1:
+            if count >= MAJORITY - 1:
                 break
         i -= 1
     commit_index = i
@@ -173,49 +180,56 @@ def handle_reject_append_msg(msg):
         return
 
     id = msg['src']
-    next_indexes[id] -= 1
+    next_indexes[id] = next_indexes[id] - 1
 
 
 def handle_request_vote_msg(msg):
     global server_state
     global voted_for
     global votes
+    global current_term
 
-    if server_state != FOLLOWER:
-        return
+    if msg['term'] >= current_term:
+         current_term = msg['term']
+         server_state = FOLLOWER
+         votes = []
+         voted_for = None
 
-    reject = {
-        'src': my_id,
-        'dst': msg['src'],
-        'leader': leader_id,
-        'type': 'reject_vote',
-        'term': current_term
-    }
+    if server_state == FOLLOWER:
 
-    grant = {
-        'src': my_id,
-        'dst': msg['src'],
-        'leader': leader_id,
-        'type': 'grant_vote',
-        'term': current_term
-    }
+        reject = {
+            'src': my_id,
+            'dst': msg['src'],
+            'leader': leader_id,
+            'type': 'reject_vote',
+            'term': current_term
+        }
 
-    if msg['term'] < current_term:
-        #send_msg(reject)
-        return
-    if not (voted_for == None or msg['candidate_id']):
-        #send_msg(reject)
-        return
-    # compare last terms, then compare log length
-    my_last_log_term = log[len(log) - 1]['term']
-    candidate_last_log_term = msg['last_log_term']
-    if my_last_log_term > candidate_last_log_term:
-        #send_msg(reject)
-        return
-    if my_last_log_term == candidate_last_log_term and len(log) - 1 > msg['last_log_index']:
-        #send_msg(reject)
-        return
-    send_msg(grant)
+        grant = {
+            'src': my_id,
+            'dst': msg['src'],
+            'leader': leader_id,
+            'type': 'grant_vote',
+            'term': current_term
+        }
+
+        if msg['term'] < current_term:
+            # send_msg(reject)
+            return
+        if voted_for != None:
+            # send_msg(reject)
+            return
+        # compare last terms, then compare log length
+        my_last_log_term = log[len(log) - 1]['term']
+        candidate_last_log_term = msg['last_log_term']
+        if my_last_log_term > candidate_last_log_term:
+            # send_msg(reject)
+            return
+        if my_last_log_term == candidate_last_log_term and len(log) - 1 > msg['last_log_index']:
+            # send_msg(reject)
+            return
+        voted_for = msg['src']
+        send_msg(grant)
 
 
 def handle_grant_vote_msg(msg):
@@ -228,7 +242,7 @@ def handle_grant_vote_msg(msg):
         return
     if msg['src'] not in votes:
         votes.append(votes)
-        if len(votes) >= majority:
+        if len(votes) >= MAJORITY:
             print('Replica %s is the new leader' % my_id)
             server_state = LEADER
             leader_id = my_id
@@ -248,8 +262,9 @@ def handle_append_entries_msg(msg):
     global leader_id
     global votes
     global voted_for
+    global last_append    
 
-    if msg['term'] > current_term:
+    if msg['term'] >= current_term:
         current_term = msg['term']
         server_state = FOLLOWER
         leader_id = msg['leader']
@@ -257,6 +272,7 @@ def handle_append_entries_msg(msg):
         voted_for = None
 
     if server_state == FOLLOWER:
+        
         reject = {
             'src': my_id,
             'dst': msg['src'],
@@ -267,13 +283,15 @@ def handle_append_entries_msg(msg):
 
         if msg['term'] < current_term:
             return
+        
+        last_append = time.time()
 
         if len(msg['entries']) == 0:
             return
 
         prev_log_index = msg['prev_log_index']
         prev_log_term = msg['prev_log_term']
-        if len(log) < prev_log_index or log[prev_log_index]['term'] != prev_log_term:
+        if len(log) - 1 < prev_log_index or log[prev_log_index]['term'] != prev_log_term:
             send_msg(reject)
             return
 
@@ -312,10 +330,12 @@ def begin_leader_election():
     global current_term
     global server_state
     global voted_for
+    global votes
     current_term += 1
     server_state = CANDIDATE
-    votes.append(my_id)
     voted_for = my_id
+    votes = []
+    votes.append(my_id)
     print('Replica %s has started a new election\n' % my_id)
     for id in replica_ids:
         msg = {
@@ -346,8 +366,8 @@ def send_heartbeat():
 
 
 def handle_msg(msg):
-    print('Replica %s received:\n%s\n' % (my_id, json.dumps(msg, indent=2)))
-
+    passed = time.time() - start_time
+    print('Replica %s received at %f:\n%s\n' % (my_id, passed, json.dumps(msg, indent=2)))    
     if msg['type'] == 'get':
         handle_get_msg(msg)
     elif msg['type'] == 'put':
@@ -369,17 +389,19 @@ def handle_msg(msg):
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect(my_id)
 print('Replica %s is up. Majority: %d. Election timeout: %dms.\n' %
-      (my_id, majority, SELECT_WAIT_TIME * 1000))
+      (my_id, MAJORITY, ELECTION_TIMEOUT))
 while True:
-    ready = None
-    if server_state == LEADER:
-        ready = select.select([sock], [], [], HEARTBEAT_TIME)[0]
-        send_heartbeat()
-    else:
-        ready = select.select([sock], [], [], SELECT_WAIT_TIME)[0]
+    ready = select.select([sock], [], [], SELECT_WAIT)[0]
     if sock in ready:
         msgs = recv_msgs()
         for msg in msgs:
             handle_msg(msg)
-    elif server_state != LEADER:
+    clock = time.time()
+    diff_heartbeat = (clock - last_heartbeat) * 1000
+    diff_append = (clock - last_append) * 1000
+    if server_state == LEADER and diff_heartbeat >= HEARTBEAT_TIME:
+        send_heartbeat()
+        last_heartbeat = clock
+    elif server_state != LEADER and diff_append >= ELECTION_TIMEOUT:
         begin_leader_election()
+        last_append = clock
