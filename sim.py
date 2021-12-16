@@ -62,7 +62,7 @@ def win(s):
 
 def warn(s):
     print(bcolors.WARNING + s + bcolors.ENDC)
-    sys.exit()
+    #sys.exit()
 
 #######################################################################################################
 
