@@ -17,8 +17,8 @@ replica_ids = sys.argv[2:]
 MAJORITY = ((len(replica_ids) + 1) // 2) + 1
 
 coef = int(my_id[3])
-ELECTION_TIMEOUT = 240 + (coef * 10)
-HEARTBEAT_TIME = 120
+ELECTION_TIMEOUT = 260 + (coef * 10)
+HEARTBEAT_TIME = 130
 SELECT_WAIT = 0.01
 last_heartbeat = time.time()
 last_append = time.time()
