@@ -306,7 +306,7 @@ def handle_append_entries_msg(msg):
                 'type': 'reject_append',
                 'term': current_term,
                 'prev_log_index': prev_log_index
-                #'log': log[:prev_log_index][-10:]
+                # 'log': log[:prev_log_index][-10:]
             }
             send_msg(reject)
             return
@@ -407,7 +407,13 @@ while True:
     ready = select.select([sock], [], [], SELECT_WAIT)[0]
     if sock in ready:
         msgs = recv_msgs()
+        hold = []
         for msg in msgs:
+            if msg['type'] == 'get' and server_state == LEADER:
+                hold.append(msg)
+            else:
+                handle_msg(msg)
+        for msg in hold:
             handle_msg(msg)
     clock = time.time()
     diff_heartbeat = (clock - last_heartbeat) * 1000
