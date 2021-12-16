@@ -10,14 +10,15 @@ import time
 # Your ID number
 my_id = sys.argv[1]
 # The ID of the leader
-leader_id = 'FFFF'
+leader_id = '0000'
 # The ID numbers of all the other replicas
 replica_ids = sys.argv[2:]
 
 MAJORITY = ((len(replica_ids) + 1) // 2) + 1
 
-ELECTION_TIMEOUT = random.randrange(100, 200, 5)
-HEARTBEAT_TIME = 80
+coef = int(my_id[3])
+ELECTION_TIMEOUT = 200 + (coef * 10)
+HEARTBEAT_TIME = 100
 SELECT_WAIT = 0.01
 last_heartbeat = time.time()
 last_append = time.time()
@@ -66,9 +67,9 @@ def recv_msgs():
     while TERMINATOR in buffer:
         position = buffer.find(TERMINATOR) + len(TERMINATOR)
         # -1 to remove the \n, which json.loads won't want
-        msgs.append(json.loads(buffer[:position - 1].decode()))
+        content = json.loads(buffer[:position - 1].decode())
+        msgs.append(content)
         buffer = buffer[position:]
-
     return msgs
 
 
@@ -99,15 +100,12 @@ def handle_get_msg(msg):
             response['value'] = database[key]
         else:
             response['value'] = ''
-    elif server_state == FOLLOWER:
-        response = create_msg(msg['src'], 'redirect', msg['MID'])
     else:
-        return
+        response = create_msg(msg['src'], 'redirect', msg['MID'])
     send_msg(response)
 
 
 def handle_put_msg(msg):
-    response = None
     if server_state == LEADER:
         log.append(
             {'term': current_term,
@@ -115,19 +113,20 @@ def handle_put_msg(msg):
              'value': msg['value'],
              'client': msg['src'],
              'MID': msg['MID']})
-        send_append_entries()
-        # database[msg['key']] = msg['value']
-        # response = create_msg(msg['src'], 'ok', msg['MID'])
-    elif server_state == FOLLOWER:
+        send_append_entries(replica_ids, False)
+    else:
         response = create_msg(msg['src'], 'redirect', msg['MID'])
         send_msg(response)
-    
 
-def send_append_entries():
-    for id in replica_ids:
+
+def send_append_entries(to_send, required):
+    if server_state != LEADER:
+        return
+    for id in to_send:
         next_index = next_indexes[id]
         prev_log_index = next_index - 1
-        print('Replica %s: %d %d' % (my_id, prev_log_index, len(log)))
+        print('Replica %s: id: %s, %d %d' %
+              (my_id, id, prev_log_index, len(log)))
         prev_log_term = log[prev_log_index]['term']
         entries = log[next_index:]
         msg = {
@@ -150,7 +149,7 @@ def apply_commits():
     while last_applied < commit_index:
         last_applied += 1
         key = log[last_applied]['key']
-        value = log[last_applied]['value']     
+        value = log[last_applied]['value']
         database[key] = value
         if server_state == LEADER:
             client = log[last_applied]['client']
@@ -164,7 +163,6 @@ def handle_grant_append_msg(msg):
 
     if server_state != LEADER:
         return
-
     id = msg['src']
     next_indexes[id] = msg['next_index']
     match_indexes[id] = msg['next_index'] - 1
@@ -179,15 +177,18 @@ def handle_grant_append_msg(msg):
             if count >= MAJORITY - 1:
                 break
         i -= 1
-    commit_index = i
-    apply_commits()
+    if i > commit_index:
+        commit_index = i
+        apply_commits()
 
 
 def handle_reject_append_msg(msg):
     if server_state != LEADER:
         return
+
     id = msg['src']
     next_indexes[id] = next_indexes[id] - 1
+    send_append_entries([id], True)
 
 
 def handle_request_vote_msg(msg):
@@ -195,14 +196,24 @@ def handle_request_vote_msg(msg):
     global voted_for
     global votes
     global current_term
+    global last_append
+    global leader_id
 
     if msg['term'] >= current_term:
         current_term = msg['term']
         server_state = FOLLOWER
+        leader_id = msg['leader']
         votes = []
         voted_for = None
 
     if server_state == FOLLOWER:
+        grant = {
+            'src': my_id,
+            'dst': msg['src'],
+            'leader': leader_id,
+            'type': 'grant_vote',
+            'term': current_term
+        }
 
         reject = {
             'src': my_id,
@@ -212,30 +223,18 @@ def handle_request_vote_msg(msg):
             'term': current_term
         }
 
-        grant = {
-            'src': my_id,
-            'dst': msg['src'],
-            'leader': leader_id,
-            'type': 'grant_vote',
-            'term': current_term
-        }
-
         if msg['term'] < current_term:
-            # send_msg(reject)
+            send_msg(reject)
             return
-        if voted_for != None:
-            # send_msg(reject)
+        if not (voted_for is None or voted_for == msg['src']):
+            send_msg(reject)
             return
-        # compare last terms, then compare log length
-        my_last_log_term = log[len(log) - 1]['term']
-        candidate_last_log_term = msg['last_log_term']
-        if my_last_log_term > candidate_last_log_term:
-            # send_msg(reject)
+        if len(log) - 1 > msg['last_log_index']:
+            send_msg(reject)
             return
-        if my_last_log_term == candidate_last_log_term and len(log) - 1 > msg['last_log_index']:
-            # send_msg(reject)
+        if log[len(log) - 1]['term'] > msg['last_log_term']:
+            send_msg(reject)
             return
-        voted_for = msg['src']
         send_msg(grant)
 
 
@@ -261,6 +260,19 @@ def handle_grant_vote_msg(msg):
                 match_indexes[id] = 0
 
 
+def handle_reject_vote_msg(msg):
+    global server_state
+    global voted_for
+    global votes
+    global current_term
+
+    if server_state == CANDIDATE and msg['term'] >= current_term:
+        current_term = msg['term']
+        server_state = FOLLOWER
+        votes = []
+        voted_for = None
+
+
 def handle_append_entries_msg(msg):
     global current_term
     global commit_index
@@ -279,42 +291,30 @@ def handle_append_entries_msg(msg):
         voted_for = None
 
     if server_state == FOLLOWER:
-
-        reject = {
-            'src': my_id,
-            'dst': msg['src'],
-            'leader': leader_id,
-            'type': 'reject_append',
-            'term': current_term
-        }
-
         if msg['term'] < current_term:
             return
 
         last_append = time.time()
 
-        if len(msg['entries']) == 0:
-            return
-
         prev_log_index = msg['prev_log_index']
         prev_log_term = msg['prev_log_term']
         if len(log) - 1 < prev_log_index or log[prev_log_index]['term'] != prev_log_term:
+            reject = {
+                'src': my_id,
+                'dst': msg['src'],
+                'leader': leader_id,
+                'type': 'reject_append',
+                'term': current_term,
+                'prev_log_index': prev_log_index
+                #'log': log[:prev_log_index][-10:]
+            }
             send_msg(reject)
             return
 
         log_insert_index = prev_log_index + 1
-        new_entry_index = 0
         new_entries = msg['entries']
-        while True:
-            if log_insert_index >= len(log) or new_entry_index >= len(new_entries):
-                break
-            if log[log_insert_index]['term'] != new_entries[new_entry_index]['term']:
-                break
-            log_insert_index += 1
-            new_entry_index += 1
-        if new_entry_index < len(new_entries):
-            log = log[:log_insert_index]
-            log.extend(new_entries[new_entry_index:])
+        log = log[:log_insert_index]
+        log.extend(new_entries)
 
         leader_commit = msg['leader_commit']
         if leader_commit > commit_index:
@@ -328,8 +328,8 @@ def handle_append_entries_msg(msg):
             'term': current_term,
             'next_index': len(log)
         }
-        send_msg(grant)
-
+        if len(msg['entries']) != 0:
+            send_msg(grant)
         apply_commits()
 
 
@@ -384,6 +384,8 @@ def handle_msg(msg):
         handle_request_vote_msg(msg)
     elif msg['type'] == 'grant_vote':
         handle_grant_vote_msg(msg)
+    elif msg['type'] == 'reject_vote':
+        handle_reject_vote_msg(msg)
     elif msg['type'] == 'append_entries':
         handle_append_entries_msg(msg)
     elif msg['type'] == 'grant_append':
@@ -398,6 +400,9 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect(my_id)
 print('Replica %s is up. Majority: %d. Election timeout: %dms.\n' %
       (my_id, MAJORITY, ELECTION_TIMEOUT))
+last_heartbeat = time.time()
+last_append = time.time()
+start_time = time.time()
 while True:
     ready = select.select([sock], [], [], SELECT_WAIT)[0]
     if sock in ready:
@@ -408,8 +413,8 @@ while True:
     diff_heartbeat = (clock - last_heartbeat) * 1000
     diff_append = (clock - last_append) * 1000
     if server_state == LEADER and diff_heartbeat >= HEARTBEAT_TIME:
-        send_heartbeat()
-        last_heartbeat = clock
+        send_append_entries(replica_ids, False)
+        last_heartbeat = time.time()
     elif server_state != LEADER and diff_append >= ELECTION_TIMEOUT:
         begin_leader_election()
-        last_append = clock
+        last_append = time.time()
