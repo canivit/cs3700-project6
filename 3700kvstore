@@ -411,7 +411,9 @@ while True:
         second = []
         third = []
         for msg in msgs:
-            if msg['type'] == 'grant_append':
+            if server_state == LEADER and msg['type'] == 'grant_append':
+                first.append(msg)
+            elif server_state == FOLLOWER and msg['type'] == 'append_entries':
                 first.append(msg)
             elif msg['src'] not in replica_ids:
                 second.append(msg)
