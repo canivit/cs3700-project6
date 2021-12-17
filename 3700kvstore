@@ -310,6 +310,7 @@ def handle_append_entries_msg(msg):
         }
 
         if len(log) - 1 < prev_log_index:
+            reject['next_index'] = len(log)
             send_msg(reject)
             return
 
