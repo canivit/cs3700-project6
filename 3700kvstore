@@ -185,9 +185,11 @@ def handle_grant_append_msg(msg):
 def handle_reject_append_msg(msg):
     if server_state != LEADER:
         return
-
     id = msg['src']
-    next_indexes[id] = next_indexes[id] - 1
+    if 'next_index' in msg:
+        next_indexes[id] = msg['next_index']
+    else:
+        next_indexes[id] = next_indexes[id] - 1
     send_append_entries([id], True)
 
 
@@ -298,16 +300,25 @@ def handle_append_entries_msg(msg):
 
         prev_log_index = msg['prev_log_index']
         prev_log_term = msg['prev_log_term']
-        if len(log) - 1 < prev_log_index or log[prev_log_index]['term'] != prev_log_term:
-            reject = {
+
+        reject = {
                 'src': my_id,
                 'dst': msg['src'],
                 'leader': leader_id,
                 'type': 'reject_append',
                 'term': current_term,
-                'prev_log_index': prev_log_index
-                # 'log': log[:prev_log_index][-10:]
-            }
+        }
+
+        if len(log) - 1 < prev_log_index:
+            send_msg(reject)
+            return
+
+        if log[prev_log_index]['term'] != prev_log_term:
+            conflicting_term = log[prev_log_index]['term']
+            for i in range(len(log)):
+                if log[i]['term'] == conflicting_term:
+                    break
+            reject['next_index'] = i            
             send_msg(reject)
             return
 
