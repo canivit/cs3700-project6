@@ -407,14 +407,17 @@ while True:
     ready = select.select([sock], [], [], SELECT_WAIT)[0]
     if sock in ready:
         msgs = recv_msgs()
-        hold = []
+        first = []
+        last = []
         for msg in msgs:
-            if msg['type'] == 'get' and server_state == LEADER:
-                hold.append(msg)
+            if msg['type'] == 'grant_append' and server_state == LEADER:
+                first.append(msg)
             else:
-                handle_msg(msg)
-        for msg in hold:
+                last.append(msg)
+        for msg in first:
             handle_msg(msg)
+        for msg in last:
+            handle_msg(msg)       
     clock = time.time()
     diff_heartbeat = (clock - last_heartbeat) * 1000
     diff_append = (clock - last_append) * 1000
